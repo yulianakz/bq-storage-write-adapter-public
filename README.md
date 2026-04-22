@@ -134,14 +134,14 @@ Diagram 1 output ──►│  list[AppendChunk]                           │
                                            │ write(rows)
                                            ▼
                     ┌──────────────────────────────────────────────┐
-                    │  BigQueryWriteRetryOrchestrator             │
+                    │  BigQueryWriteRetryOrchestrator              │
                     │  same Destination interface                  │
                     └──────────────────────┬───────────────────────┘
                                            │ delegate write
                                            ▼
                     ┌──────────────────────────────────────────────┐
-                    │  BigQueryStorageWriteDestination            │
-                    │  runs Diagram 1 + Diagram 2                 │
+                    │  BigQueryStorageWriteDestination             │
+                    │  runs Diagram 1 + Diagram 2                  │
                     └──────────────────────┬───────────────────────┘
                                            │ returns DestinationWriteStats
                                            ▼
@@ -154,9 +154,9 @@ Diagram 1 output ──►│  list[AppendChunk]                           │
                                     │ close()              │ final result
                                     ▼                      ▼
                     ┌──────────────────────────┐   ┌──────────────────────────┐
-                    │ Stream lifecycle         │   │ RetryOrchestratorStats    │
-                    │ COMMITTED: release only  │   │ destination stats + retry │
-                    │ PENDING: finalize+commit │   │ counters + last error     │
+                    │ Stream lifecycle         │   │ RetryOrchestratorStats   │
+                    │ COMMITTED: release only  │   │ destination stats + retry│
+                    │ PENDING: finalize+commit │   │ counters + last error    │
                     └──────────────────────────┘   └──────────────────────────┘
 ```
 
