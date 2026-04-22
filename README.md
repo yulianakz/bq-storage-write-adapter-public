@@ -54,8 +54,8 @@ Caller `write(rows)`│  Sequence[dict]                              │
                                     │ good_rows            │ bad_rows (RowSerializationError)
                                     ▼                      ▼
                     ┌──────────────────────────┐   ┌──────────────────────────┐
-                    │  plan_append_chunks      │   │ DestinationWriteStats     │
-                    │  (size + row budgets)    │   │ serializer_row_failures   │
+                    │  plan_append_chunks      │   │ DestinationWriteStats    │
+                    │  (size + row budgets)    │   │ serializer_row_failures  │
                     └──────────────┬───────────┘   └──────────────────────────┘
                                    │
                                    │ list[AppendChunk]
@@ -91,7 +91,7 @@ Diagram 1 output ──►│  list[AppendChunk]                           │
                                            │ send over gRPC stream
                                            ▼
                     ┌──────────────────────────────────────────────┐
-                    │  BigQuery AppendRowsResponse                │
+                    │  BigQuery AppendRowsResponse                 │
                     └──────────────────────┬───────────────────────┘
                                            │ classify(response / exception)
                                            ▼
@@ -103,8 +103,8 @@ Diagram 1 output ──►│  list[AppendChunk]                           │
                                     │ row_errors           │ normal / retry / terminal path
                                     ▼                      ▼
                     ┌──────────────────────────┐   ┌──────────────────────────┐
-                    │  row_errors_mapping      │   │ DestinationWriteStats     │
-                    │  chunk idx -> input row  │   │ counts, error, skips      │
+                    │  row_errors_mapping      │   │ DestinationWriteStats    │
+                    │  chunk idx -> input row  │   │ counts, error, skips     │
                     └──────────────┬───────────┘   └──────────────────────────┘
                                    │
                                    │ row_error_bad_rows / row_error_good_rows
