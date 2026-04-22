@@ -1,0 +1,3 @@
+-r requirements.txt
+pytest>=8,<10
+types-protobuf>=4.25
