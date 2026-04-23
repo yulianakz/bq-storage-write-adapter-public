@@ -1,9 +1,8 @@
 # BigQuery Storage Write Adapter
 
-Python adapter for the
-[BigQuery Storage Write API](https://cloud.google.com/bigquery/docs/write-api).
+Python ingestion adapter that simplifies streaming data into BigQuery using the Storage Write API.
 
-It accepts dictionary rows, serializes them into dynamic protobuf messages,
+It accepts rows, serializes them into dynamic protobuf messages,
 splits payloads into API-safe chunks, writes to a dedicated stream with strict
 offset handling, and returns typed outcomes that callers can act on.
 
