@@ -33,7 +33,6 @@ This module wraps that complexity behind the
 ## Architecture
 
 The flow is split into three short diagrams.  
-Solid arrows are the main path. Dashed arrows are side channels (errors, retries, stats).
 
 ### Diagram 1: Serialization
 
