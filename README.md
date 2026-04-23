@@ -353,5 +353,4 @@ This adapter is the destination component of a larger
 ---
 
 ## License & Usage
-
-This project is for portfolio and demonstration purposes only. All rights reserved. No permission is granted to use, modify, or redistribute this software for any purpose. It is provided "as is" without warranty of any kind.
+Disclaimer: This project is for demonstration purposes only. All rights reserved. No permission is granted to use, modify, or redistribute this software for any purpose. The software is provided "as is", and in no event shall the authors be liable for any claim, damages or other liability, whether in an action of contract, tort or otherwise, arising from, out of or in connection with the software or the use or other dealings in the software.
