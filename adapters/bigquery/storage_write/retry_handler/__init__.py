@@ -1,4 +1,6 @@
-from adapters.bigquery.storage_write.retry_handler.error_policy import ErrorPolicy
+from adapters.bigquery.storage_write.retry_handler.extended_error_policy import (
+    ExtendedErrorPolicy,
+)
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
 from adapters.bigquery.storage_write.retry_handler.bq_retry_orchestrator_models import (
     FlattenedRetryOrchestratorStats,
@@ -11,7 +13,7 @@ from adapters.bigquery.storage_write.retry_handler.writeapierror import (
 __all__ = [
     "BigQueryStorageWriteError",
     "ErrorCategory",
-    "ErrorPolicy",
+    "ExtendedErrorPolicy",
     "FlattenedRetryOrchestratorStats",
     "RetryOrchestratorStats",
 ]

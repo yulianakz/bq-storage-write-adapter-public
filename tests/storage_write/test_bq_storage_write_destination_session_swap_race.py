@@ -135,17 +135,13 @@ def test_session_swap_between_resolve_and_lock_acquire_triggers_retry(monkeypatc
         "_get_or_create_session",
         fake_get_or_create_session,
     )
-    # Make sure the real ErrorPolicy.* don't interfere: the fake stream never
+    # Make sure the real ExtendedErrorPolicy doesn't interfere: the fake stream never
     # raises and response.append_result is a truthy SimpleNamespace so the
-    # real classify_append_rows_response returns None anyway, but patching
+    # real classifier returns None anyway, but patching
     # keeps this test hermetic.
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
-        lambda response, *, stream, stream_mode: None,
-    )
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda exc, *, stream, stream_mode: None,
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
+        lambda *args, **kwargs: None,
     )
 
     stats = destination.write([{"id": "a"}])
@@ -198,12 +194,8 @@ def test_no_session_swap_appends_exactly_once_without_retry(monkeypatch) -> None
         fake_get_or_create_session,
     )
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
-        lambda response, *, stream, stream_mode: None,
-    )
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda exc, *, stream, stream_mode: None,
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
+        lambda *args, **kwargs: None,
     )
 
     stats = destination.write([{"id": "a"}])

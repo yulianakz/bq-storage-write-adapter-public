@@ -13,9 +13,9 @@ from adapters.bigquery.storage_write.row_serializer.serializer_models import (
 from google.cloud import bigquery_storage_v1
 from google.cloud.bigquery_storage_v1 import types, writer
 
-# Avoid a circular import at runtime: `retry_handler.error_policy` imports
+# Avoid a circular import at runtime: `retry_handler.extended_error_policy` imports
 # `StreamMode` from this module, and `retry_handler/__init__.py` eagerly loads
-# `error_policy`. Keeping the error type as a forward reference here breaks the
+# `extended_error_policy`. Keeping the error type as a forward reference here breaks the
 # cycle without affecting dataclass semantics.
 if TYPE_CHECKING:
     from adapters.bigquery.storage_write.retry_handler.writeapierror import (

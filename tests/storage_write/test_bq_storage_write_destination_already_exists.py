@@ -77,7 +77,7 @@ class _FakeSerializer:
 
 
 def _already_exists_policy_error(stream: str) -> BigQueryStorageWriteError:
-    # Mirrors the shape produced by ErrorPolicy.grpc_code_mapping for
+    # Mirrors the shape produced by ExtendedErrorPolicy.grpc_code_mapping for
     # code_pb2.ALREADY_EXISTS so the destination sees a realistic object.
     return BigQueryStorageWriteError(
         "BigQuery Storage Write append: offset already committed",
@@ -118,7 +118,7 @@ def _build_destination_three_chunks(
     """
     Build a destination whose serializer emits 3 one-byte rows and whose config
     forces `append_max_rows=1` so the planner splits into exactly 3 one-row
-    chunks. The patched ErrorPolicy.classify_append_rows_response returns an
+    chunks. The patched classifier returns an
     ALREADY_EXISTS policy error for the chunk indices in
     `already_exists_chunk_indices` (by call order) and None for all others.
     """
@@ -145,7 +145,9 @@ def _build_destination_three_chunks(
 
     call_counter = {"n": 0}
 
-    def fake_classify_response(response, *, stream, stream_mode):
+    def fake_classify_result(event, *, stream, stream_mode):
+        if isinstance(event, Exception):
+            return None
         index = call_counter["n"]
         call_counter["n"] += 1
         if index in already_exists_chunk_indices:
@@ -153,14 +155,8 @@ def _build_destination_three_chunks(
         return None
 
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
-        fake_classify_response,
-    )
-    # The fake stream never raises from send() / future.result(), but keep this
-    # patched so any accidental exception path isn't hidden by the real policy.
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda *args, **kwargs: None,
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
+        fake_classify_result,
     )
 
     destination = BigQueryStorageWriteDestination(config=_config(append_max_rows=1))
