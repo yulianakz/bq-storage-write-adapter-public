@@ -27,7 +27,9 @@ from adapters.bigquery.storage_write.row_serializer.serializer_models import (
     RowSerializationError,
 )
 from adapters.bigquery.storage_write.write_limits import resolve_write_limits
-from adapters.bigquery.storage_write.retry_handler.error_policy import ErrorPolicy
+from adapters.bigquery.storage_write.retry_handler.extended_error_policy import (
+    ExtendedErrorPolicy,
+)
 from ports import Destination
 from google.cloud.bigquery_storage_v1 import types
 from google.cloud.bigquery_storage_v1.types import RowError
@@ -222,7 +224,7 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
                 try:
                     send_future = session.append_rows_stream.send(request)
                 except Exception as exc:
-                    policy_error = ErrorPolicy.classify_exception(
+                    policy_error = ExtendedErrorPolicy.classify_result(
                         exc,
                         stream=session.stream_name,
                         stream_mode=self._config.stream_mode,
@@ -233,14 +235,14 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
 
             try:
                 response = send_future.result(timeout=self._config.append_timeout_seconds)
-                policy_error = ErrorPolicy.classify_append_rows_response(
+                policy_error = ExtendedErrorPolicy.classify_result(
                     response,
                     stream=session.stream_name,
                     stream_mode=self._config.stream_mode,
                 )
 
             except Exception as exc:
-                policy_error = ErrorPolicy.classify_exception(
+                policy_error = ExtendedErrorPolicy.classify_result(
                     exc,
                     stream=session.stream_name,
                     stream_mode=self._config.stream_mode,

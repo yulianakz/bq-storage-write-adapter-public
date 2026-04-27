@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from concurrent.futures import TimeoutError
+from typing import Any
 
 from google.cloud.bigquery_storage_v1.types import AppendRowsResponse
 from google.rpc import code_pb2
@@ -7,20 +10,51 @@ from adapters.bigquery.storage_write.bq_storage_write_models import StreamMode
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
 from adapters.bigquery.storage_write.retry_handler.writeapierror import BigQueryStorageWriteError
 
+try:
+    from google.api_core import exceptions as gax_exceptions
+except Exception:
+    gax_exceptions = None
 
-class ErrorPolicy:
+
+class ExtendedErrorPolicy:
+
+    """
+    Extended policy that unifies gRPC classification for both:
+    - response-level failures (AppendRowsResponse.error)
+    - exception-level failures (google.api_core.exceptions.* from send/result)
+    NOTE: CANCELLED intent-aware handling is not implemented yet.
+    Until caller lifecycle context is passed (e.g. intentional close signal),
+    CANCELLED is intentionally not mapped in grpc_code_mapping.
+    """
 
     @staticmethod
-    def classify_exception(exc: Exception, *, stream: str, stream_mode: StreamMode) -> BigQueryStorageWriteError:
+    def classify_result(
+        event: Exception | AppendRowsResponse,
+        *,
+        stream: str,
+        stream_mode: StreamMode
+    ) -> BigQueryStorageWriteError | None:
+
+        if isinstance(event, Exception):
+            return ExtendedErrorPolicy.classify_exception(
+                event, stream=stream, stream_mode=stream_mode
+            )
+        return ExtendedErrorPolicy.classify_append_rows_response(
+            event, stream=stream, stream_mode=stream_mode
+        )
+
+    @staticmethod
+    def classify_exception(
+        exc: Exception, *, stream: str, stream_mode: StreamMode
+    ) -> BigQueryStorageWriteError:
+
         """
         Classify transport-level exceptions (timeouts, connection resets, etc.).
         The destination/orchestrator decides how to act on the returned flags:
         retry, reset stream, and whether the offset may be consumed.
         """
 
-        # Timeout: retry safely by resetting the session; do not consume offset.
-        # Note: in Python 3.10+ `socket.timeout` is an alias of the built-in
-        # `TimeoutError`, and in 3.11+ so is `concurrent.futures.TimeoutError`.
+        # Timeout: retry safely with session reset.
         if isinstance(exc, TimeoutError):
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write append timed out",
@@ -35,7 +69,7 @@ class ErrorPolicy:
                 category=ErrorCategory.DEADLINE,
             )
 
-        # Transport/network failures: retry and reset the session; do not consume offset.
+        # Transport/network failures: retry and reset session.
         if isinstance(exc, (ConnectionError, BrokenPipeError, OSError)):
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write transport failure",
@@ -50,14 +84,25 @@ class ErrorPolicy:
                 category=ErrorCategory.TRANSPORT,
             )
 
-        # Unknown exception: treat as fatal for safety (no retry/reset/offset advance).
-        return ErrorPolicy.fallback_classifier(exc, stream)
+        # API-core failures are common for bidi stream failures.
+        root = ExtendedErrorPolicy._unwrap_retry_error(exc)
+        mapped = ExtendedErrorPolicy._classify_google_api_exception(
+            root, stream=stream, stream_mode=stream_mode
+        )
+        if mapped is not None:
+            # Preserve top-level exception for diagnostics even if we classified
+            # using an unwrapped cause.
+            mapped.original_exception = exc
+            return mapped
+
+        return ExtendedErrorPolicy.fallback_classifier(exc, stream)
 
 
     @staticmethod
     def classify_append_rows_response(
         response: AppendRowsResponse, *, stream: str, stream_mode: StreamMode
     ) -> BigQueryStorageWriteError | None:
+
         """
         Classify an AppendRowsResponse.
         Returns None if the response indicates success (AppendRowsResponse.append_result).
@@ -94,16 +139,15 @@ class ErrorPolicy:
         # Response-level error (gRPC status via response.error).
         status = getattr(response, "error", None)
         if status is not None:
-            code = getattr(status, "code", None)
+            code = ExtendedErrorPolicy._normalize_grpc_status_code(getattr(status, "code", None))
             status_message = getattr(status, "message", None)
-            return ErrorPolicy.grpc_code_mapping(
+            return ExtendedErrorPolicy.grpc_code_mapping(
                 code=code,
                 status_message=status_message,
                 stream=stream,
                 stream_mode=stream_mode,
             )
 
-        # Defensive fallback: unexpected response shape.
         return BigQueryStorageWriteError(
             "Unknown AppendRowsResponse failure (no append_result, no row_errors, no error)",
             stream=stream,
@@ -118,6 +162,103 @@ class ErrorPolicy:
         )
 
     @staticmethod
+    def _unwrap_retry_error(exc: Exception) -> Exception:
+        if gax_exceptions is None:
+            return exc
+
+        current: Exception = exc
+        visited: set[int] = set()
+        # Guard against accidental cause cycles.
+        while id(current) not in visited:
+            visited.add(id(current))
+            if not isinstance(current, gax_exceptions.RetryError):
+                break
+            cause = getattr(current, "cause", None)
+            if not isinstance(cause, Exception):
+                break
+            current = cause
+        return current
+
+
+    @staticmethod
+    def _classify_google_api_exception(
+        exc: Exception, *, stream: str, stream_mode: StreamMode
+    ) -> BigQueryStorageWriteError | None:
+        if gax_exceptions is None:
+            return None
+
+        if not isinstance(exc, gax_exceptions.GoogleAPICallError):
+            return None
+
+        grpc_code = ExtendedErrorPolicy._normalize_grpc_status_code(
+            getattr(exc, "grpc_status_code", None)
+        )
+        if grpc_code is not None:
+            return ExtendedErrorPolicy.grpc_code_mapping(
+                code=grpc_code,
+                status_message=str(exc),
+                stream=stream,
+                stream_mode=stream_mode,
+            )
+
+        # Fallback for api-core exceptions without grpc_status_code:
+        # map known subclasses into grpc_code_mapping to avoid UNKNOWN fatal
+        # classification for common service/client errors.
+        exception_code_fallbacks = (
+            (gax_exceptions.ResourceExhausted, code_pb2.RESOURCE_EXHAUSTED),
+            (gax_exceptions.TooManyRequests, code_pb2.RESOURCE_EXHAUSTED),
+            (gax_exceptions.ServiceUnavailable, code_pb2.UNAVAILABLE),
+            (gax_exceptions.DeadlineExceeded, code_pb2.DEADLINE_EXCEEDED),
+            (gax_exceptions.InternalServerError, code_pb2.INTERNAL),
+            (gax_exceptions.Aborted, code_pb2.ABORTED),
+            (gax_exceptions.InvalidArgument, code_pb2.INVALID_ARGUMENT),
+            (gax_exceptions.BadRequest, code_pb2.INVALID_ARGUMENT),
+            (gax_exceptions.PermissionDenied, code_pb2.PERMISSION_DENIED),
+            (gax_exceptions.Forbidden, code_pb2.PERMISSION_DENIED),
+            (gax_exceptions.Unauthenticated, code_pb2.UNAUTHENTICATED),
+            (gax_exceptions.NotFound, code_pb2.NOT_FOUND),
+            (gax_exceptions.AlreadyExists, code_pb2.ALREADY_EXISTS),
+            (gax_exceptions.FailedPrecondition, code_pb2.FAILED_PRECONDITION),
+            (gax_exceptions.OutOfRange, code_pb2.OUT_OF_RANGE),
+        )
+
+        for exception_type, fallback_code in exception_code_fallbacks:
+            if isinstance(exc, exception_type):
+                return ExtendedErrorPolicy.grpc_code_mapping(
+                    code=fallback_code,
+                    status_message=str(exc),
+                    stream=stream,
+                    stream_mode=stream_mode,
+                )
+
+        return None
+
+    @staticmethod
+    def _normalize_grpc_status_code(code: Any) -> int | None:
+        if code is None:
+            return None
+        if isinstance(code, int):
+            return code
+
+        # grpc.StatusCode (enum) usually exposes .name; map by symbolic name.
+        name = getattr(code, "name", None)
+        if isinstance(name, str) and hasattr(code_pb2, name):
+            return int(getattr(code_pb2, name))
+
+        # Some wrappers may expose integer value as a tuple in .value.
+        value = getattr(code, "value", None)
+        if isinstance(value, int):
+            return value
+        if (
+            isinstance(value, tuple)
+            and len(value) > 0
+            and isinstance(value[0], int)
+        ):
+            return value[0]
+        return None
+
+
+    @staticmethod
     def grpc_code_mapping(
         *,
         code: int | None,
@@ -125,16 +266,12 @@ class ErrorPolicy:
         stream: str,
         stream_mode: StreamMode,
     ) -> BigQueryStorageWriteError:
+
         """
         Map gRPC/BigQuery status codes to a Phase-1 retry/reset/offset policy.
         """
 
         if code == code_pb2.ALREADY_EXISTS:
-            # Pure offset idempotency signal from the server: the rows at this
-            # offset window are already committed (COMMITTED stream) or already
-            # buffered (PENDING stream). The current chunk is a no-op: do not
-            # DLQ, do not reset, advance the local offset, and keep attempting
-            # subsequent chunks in the same write() call.
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write append: offset already committed",
                 stream=stream,
@@ -153,7 +290,6 @@ class ErrorPolicy:
             )
 
         if code == code_pb2.RESOURCE_EXHAUSTED:
-            # Throttle: retry without resetting the session.
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write append throttled / resource exhausted",
                 stream=stream,
@@ -170,7 +306,7 @@ class ErrorPolicy:
                 category=ErrorCategory.THROTTLE,
             )
 
-        if code in (code_pb2.UNAVAILABLE,):
+        if code == code_pb2.UNAVAILABLE:
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write append service unavailable",
                 stream=stream,
@@ -223,8 +359,6 @@ class ErrorPolicy:
 
         if code == code_pb2.OUT_OF_RANGE:
             if stream_mode == StreamMode.COMMITTED:
-                # Commit mode should re-sync offsets from server before retrying.
-                # This flag asks caller to reset/fetch before retry.
                 return BigQueryStorageWriteError(
                     "BigQuery Storage Write offset mismatch (committed stream): re-sync needed",
                     stream=stream,
@@ -241,7 +375,6 @@ class ErrorPolicy:
                     category=ErrorCategory.OFFSET_OUT_OF_RANGE,
                 )
 
-            # Pending mode has no strict offset contract; fail current run safely.
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write offset mismatch (pending stream)",
                 stream=stream,
@@ -276,7 +409,6 @@ class ErrorPolicy:
                     category=ErrorCategory.STREAM_INVALIDATED,
                 )
 
-            # Pending stream often means the stream lifecycle ended/finalized.
             return BigQueryStorageWriteError(
                 "BigQuery Storage Write pending stream invalidated/finalized",
                 stream=stream,
@@ -361,7 +493,6 @@ class ErrorPolicy:
                 category=ErrorCategory.NOT_FOUND,
             )
 
-        # Unknown/unsupported gRPC status code: fatal by default.
         return BigQueryStorageWriteError(
             f"BigQuery Storage Write unknown gRPC error code: {code}",
             stream=stream,
@@ -379,9 +510,7 @@ class ErrorPolicy:
         )
 
     @staticmethod
-    def fallback_classifier(
-        exc: Exception, stream: str
-    ) -> BigQueryStorageWriteError:
+    def fallback_classifier(exc: Exception, stream: str) -> BigQueryStorageWriteError:
         """
         Fallback classification for unexpected exceptions.
         Phase-1 policy: treat as fatal to avoid accidental retries/offset consumption.

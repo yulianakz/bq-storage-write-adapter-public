@@ -146,12 +146,8 @@ def test_write_surfaces_non_retryable_terminal_policy_error_in_stats(monkeypatch
     )
 
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
-        lambda *args, **kwargs: terminal_error,
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
+        lambda event, **kwargs: terminal_error if not isinstance(event, Exception) else None,
     )
 
     destination = BigQueryStorageWriteDestination(config=_config())

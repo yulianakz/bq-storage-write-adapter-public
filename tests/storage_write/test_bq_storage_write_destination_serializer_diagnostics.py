@@ -150,11 +150,7 @@ def test_write_appends_only_good_serialized_rows(monkeypatch) -> None:
         lambda config: fake_session,
     )
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
         lambda *args, **kwargs: None,
     )
 
@@ -197,11 +193,7 @@ def test_write_splits_large_batch_into_multiple_appends(monkeypatch) -> None:
         lambda config: fake_session,
     )
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
         lambda *args, **kwargs: None,
     )
 
@@ -245,11 +237,7 @@ def test_write_tiny_budget_splits_on_exact_payload_boundary(monkeypatch) -> None
         lambda config: fake_session,
     )
     monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_exception",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "adapters.bigquery.storage_write.bq_storage_write_destination.ErrorPolicy.classify_append_rows_response",
+        "adapters.bigquery.storage_write.bq_storage_write_destination.ExtendedErrorPolicy.classify_result",
         lambda *args, **kwargs: None,
     )
 
