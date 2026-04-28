@@ -17,7 +17,7 @@ from adapters.bigquery.storage_write.bq_storage_write_utilities import (
     plan_append_chunks,
 )
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
-from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+from adapters.bigquery.storage_write.retry_handler.write_api_error import (
     BigQueryStorageWriteError,
 )
 from adapters.bigquery.storage_write.row_errors_mapping import (
@@ -27,6 +27,7 @@ from adapters.bigquery.storage_write.row_serializer.serializer_models import (
     RowSerializationError,
 )
 from adapters.bigquery.storage_write.write_limits import resolve_write_limits
+from adapters.bigquery.storage_write.write_limits import ResolvedWriteLimits
 from adapters.bigquery.storage_write.retry_handler.extended_error_policy import (
     ExtendedErrorPolicy,
 )
@@ -51,6 +52,9 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
 
         # Lock order rule: _session_lock must never be acquired while holding _write_lock.
         self._session: StorageWriteSession | None = None
+
+        # Resolved and validated write limits; cached since config is immutable.
+        self._limits: ResolvedWriteLimits | None = None
 
         # Latched by the job layer on full success; pending streams commit only when set.
         self._job_succeeded = False
@@ -277,48 +281,118 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
         self,
         *,
         ok: bool,
-        attempted_rows: int,
-        written_rows: int,
+        total_rows: int,
+        resolve_write_limit_passed: int = 0,
+        resolve_write_limit_failed: int = 0,
+        serializer_attempted_rows: int = 0,
+        serializer_rows_passed: int = 0,
         serializer_row_failures: list[RowSerializationError] | None = None,
+        chunk_planner_attempted: int = 0,
+        derived_chunk_count: int = 0,
+        derived_chunks_len: list[int] | None = None,
+        append_rows_send_attempted: int = 0,
+        append_rows_send_passed: int = 0,
+        append_rows_send_failed: int = 0,
         error: BigQueryStorageWriteError | None = None,
         row_error_bad_rows: list[dict[str, Any]] | None = None,
         row_error_good_rows: list[dict[str, Any]] | None = None,
+        row_error_bad_count: int = 0,
+        row_error_good_count: int = 0,
         skipped_already_exists_rows: int = 0,
     ) -> DestinationWriteStats:
 
-        # `failed_rows` excludes ALREADY_EXISTS skips
-        failed_rows = attempted_rows - written_rows - skipped_already_exists_rows
-        if failed_rows < 0:
-            failed_rows = 0
+        # `total_failed_rows` excludes ALREADY_EXISTS skips.
+        total_written_rows = append_rows_send_passed
+        total_failed_rows = total_rows - total_written_rows - skipped_already_exists_rows
+        if total_failed_rows < 0:
+            logger.warning(
+                "Storage Write stats clamp: computed total_failed_rows was negative; clamping to zero",
+                extra={
+                    "total_rows": total_rows,
+                    "append_rows_send_passed": append_rows_send_passed,
+                    "skipped_already_exists_rows": skipped_already_exists_rows,
+                    "computed_total_failed_rows": total_failed_rows,
+                },
+            )
+            total_failed_rows = 0
 
         return DestinationWriteStats(
             ok=ok,
-            attempted_rows=attempted_rows,
-            written_rows=written_rows,
-            failed_rows=failed_rows,
-            skipped_already_exists_rows=skipped_already_exists_rows,
-            error=error,
+            total_rows=total_rows,
+            total_written_rows=total_written_rows,
+            total_failed_rows=total_failed_rows,
+            resolve_write_limit_passed=resolve_write_limit_passed,
+            resolve_write_limit_failed=resolve_write_limit_failed,
+            serializer_attempted_rows=serializer_attempted_rows,
+            serializer_rows_passed=serializer_rows_passed,
+            serializer_rows_failed=len(serializer_row_failures) if serializer_row_failures is not None else 0,
             serializer_row_failures=serializer_row_failures or None,
-            serializer_row_failure_count=len(serializer_row_failures) if serializer_row_failures is not None else 0,
-            stream_mode=self._config.stream_mode.value,
+            chunk_planner_attempted=chunk_planner_attempted,
+            derived_chunk_count=derived_chunk_count,
+            derived_chunks_len=derived_chunks_len,
+            append_rows_send_attempted=append_rows_send_attempted,
+            append_rows_send_passed=append_rows_send_passed,
+            append_rows_send_failed=append_rows_send_failed,
+            skipped_already_exists_rows=skipped_already_exists_rows,
+            row_error_bad_count=row_error_bad_count,
+            row_error_good_count=row_error_good_count,
             row_error_bad_rows=row_error_bad_rows,
             row_error_good_rows=row_error_good_rows,
+            error=error,
+            stream_mode=self._config.stream_mode.value,
         )
 
+    def _get_or_resolve_limits(self) -> ResolvedWriteLimits:
+        limits = self._limits
+        if limits is None:
+            limits = resolve_write_limits(self._config)
+            self._limits = limits
+        return limits
+
     def write(self, rows: Sequence[dict[str, Any]]) -> DestinationWriteStats:
+        total_rows = len(rows)
 
         if not rows:
             return self._aggregate_write_stats(
                 ok=True,
-                attempted_rows=0,
-                written_rows=0,
+                total_rows=0,
             )
 
-        limits = resolve_write_limits(self._config)
+        resolve_write_limit_passed = 0
+        resolve_write_limit_failed = 0
+
+        try:
+            limits = self._get_or_resolve_limits()
+            resolve_write_limit_passed = total_rows
+        except ValueError as exc:
+            resolve_write_limit_failed = total_rows
+            config_error = BigQueryStorageWriteError(
+                str(exc),
+                stream=None,
+                original_exception=exc,
+                retryable=False,
+                needs_reset=False,
+                offset_alignment=False,
+                fatal_state=True,
+                advance_offset=False,
+                send_to_dlq=False,
+                category=ErrorCategory.INVALID_ARGUMENT,
+            )
+            return self._aggregate_write_stats(
+                ok=False,
+                total_rows=total_rows,
+                resolve_write_limit_passed=resolve_write_limit_passed,
+                resolve_write_limit_failed=resolve_write_limit_failed,
+                error=config_error,
+                serializer_row_failures=None,
+            )
         serialized_rows, serializer_row_failures, good_row_indices = self._serialize_with_diagnostics(
             rows,
             row_max_bytes=limits.row_max_bytes,
         )
+        serializer_attempted_rows = resolve_write_limit_passed
+        serializer_rows_passed = len(serialized_rows)
+        chunk_planner_attempted = serializer_rows_passed
 
         if not serialized_rows:
             all_serialization_failed_error = BigQueryStorageWriteError(
@@ -335,8 +409,11 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
             )
             return self._aggregate_write_stats(
                 ok=False,
-                attempted_rows=len(rows),
-                written_rows=0,
+                total_rows=total_rows,
+                resolve_write_limit_passed=resolve_write_limit_passed,
+                resolve_write_limit_failed=resolve_write_limit_failed,
+                serializer_attempted_rows=serializer_attempted_rows,
+                serializer_rows_passed=serializer_rows_passed,
                 serializer_row_failures=serializer_row_failures,
                 error=all_serialization_failed_error,
             )
@@ -346,8 +423,12 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
             max_rows=limits.max_rows,
             max_payload_bytes=limits.request_payload_budget_bytes,
         )
+        derived_chunk_count = len(append_chunks)
+        derived_chunks_len = [len(chunk.rows) for chunk in append_chunks]
 
-        written_rows = 0
+        append_rows_send_attempted = 0
+        append_rows_send_passed = 0
+        append_rows_send_failed = 0
         skipped_already_exists_rows = 0
         chunk_ser_start = 0
 
@@ -358,6 +439,8 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
         accumulated_row_error_bad: list[dict[str, Any]] = []
         accumulated_row_error_good: list[dict[str, Any]] = []
         accumulated_row_errors: list[RowError] = []
+        row_error_bad_count = 0
+        row_error_good_count = 0
         terminal_error: BigQueryStorageWriteError | None = None
         last_row_errors_stream: str | None = None
 
@@ -367,12 +450,13 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
             )
 
             chunk_len = len(append_chunk.rows)
+            append_rows_send_attempted += chunk_len
 
             if policy_error is None:
                 with self._write_lock:
                     if session is self._session and expected_next_offset is not None:
                         session.next_offset = expected_next_offset
-                written_rows += chunk_len
+                append_rows_send_passed += chunk_len
                 chunk_ser_start += chunk_len
                 continue
 
@@ -401,6 +485,7 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
                 continue
 
             if policy_error.has_row_errors:
+                append_rows_send_failed += chunk_len
                 chunk_bad, chunk_good = map_chunk_row_errors_to_original(
                     rows=rows,
                     good_row_indices=good_row_indices,
@@ -410,14 +495,17 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
                 )
                 if chunk_bad:
                     accumulated_row_error_bad.extend(chunk_bad)
+                    row_error_bad_count += len(chunk_bad)
                 if chunk_good:
                     accumulated_row_error_good.extend(chunk_good)
+                    row_error_good_count += len(chunk_good)
                 accumulated_row_errors.extend(policy_error.row_errors)
                 last_row_errors_stream = policy_error.stream
                 chunk_ser_start += chunk_len
                 continue
 
             # Non-row-errors terminal (or retryable): stop issuing further AppendRowsRequests.
+            append_rows_send_failed += chunk_len
             terminal_error = policy_error
             break
 
@@ -427,12 +515,23 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
         if terminal_error is not None:
             return self._aggregate_write_stats(
                 ok=False,
-                attempted_rows=len(rows),
-                written_rows=written_rows,
+                total_rows=total_rows,
+                resolve_write_limit_passed=resolve_write_limit_passed,
+                resolve_write_limit_failed=resolve_write_limit_failed,
+                serializer_attempted_rows=serializer_attempted_rows,
+                serializer_rows_passed=serializer_rows_passed,
                 error=terminal_error,
                 serializer_row_failures=serializer_row_failures,
+                chunk_planner_attempted=chunk_planner_attempted,
+                derived_chunk_count=derived_chunk_count,
+                derived_chunks_len=derived_chunks_len,
+                append_rows_send_attempted=append_rows_send_attempted,
+                append_rows_send_passed=append_rows_send_passed,
+                append_rows_send_failed=append_rows_send_failed,
                 row_error_bad_rows=row_err_bad_out,
                 row_error_good_rows=row_err_good_out,
+                row_error_bad_count=row_error_bad_count,
+                row_error_good_count=row_error_good_count,
                 skipped_already_exists_rows=skipped_already_exists_rows,
             )
 
@@ -452,20 +551,42 @@ class BigQueryStorageWriteDestination(Destination[dict[str, Any], DestinationWri
             )
             return self._aggregate_write_stats(
                 ok=False,
-                attempted_rows=len(rows),
-                written_rows=written_rows,
+                total_rows=total_rows,
+                resolve_write_limit_passed=resolve_write_limit_passed,
+                resolve_write_limit_failed=resolve_write_limit_failed,
+                serializer_attempted_rows=serializer_attempted_rows,
+                serializer_rows_passed=serializer_rows_passed,
                 error=combined_row_errors_policy,
                 serializer_row_failures=serializer_row_failures,
+                chunk_planner_attempted=chunk_planner_attempted,
+                derived_chunk_count=derived_chunk_count,
+                derived_chunks_len=derived_chunks_len,
+                append_rows_send_attempted=append_rows_send_attempted,
+                append_rows_send_passed=append_rows_send_passed,
+                append_rows_send_failed=append_rows_send_failed,
                 row_error_bad_rows=row_err_bad_out,
                 row_error_good_rows=row_err_good_out,
+                row_error_bad_count=row_error_bad_count,
+                row_error_good_count=row_error_good_count,
                 skipped_already_exists_rows=skipped_already_exists_rows,
             )
 
         return self._aggregate_write_stats(
             ok=True,
-            attempted_rows=len(rows),
-            written_rows=written_rows,
+            total_rows=total_rows,
+            resolve_write_limit_passed=resolve_write_limit_passed,
+            resolve_write_limit_failed=resolve_write_limit_failed,
+            serializer_attempted_rows=serializer_attempted_rows,
+            serializer_rows_passed=serializer_rows_passed,
             serializer_row_failures=serializer_row_failures,
+            chunk_planner_attempted=chunk_planner_attempted,
+            derived_chunk_count=derived_chunk_count,
+            derived_chunks_len=derived_chunks_len,
+            append_rows_send_attempted=append_rows_send_attempted,
+            append_rows_send_passed=append_rows_send_passed,
+            append_rows_send_failed=append_rows_send_failed,
+            row_error_bad_count=row_error_bad_count,
+            row_error_good_count=row_error_good_count,
             skipped_already_exists_rows=skipped_already_exists_rows,
         )
 

@@ -8,7 +8,7 @@ from google.rpc import code_pb2
 
 from adapters.bigquery.storage_write.bq_storage_write_models import StreamMode
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
-from adapters.bigquery.storage_write.retry_handler.writeapierror import BigQueryStorageWriteError
+from adapters.bigquery.storage_write.retry_handler.write_api_error import BigQueryStorageWriteError
 
 try:
     from google.api_core import exceptions as gax_exceptions
@@ -89,13 +89,13 @@ class ExtendedErrorPolicy:
         mapped = ExtendedErrorPolicy._classify_google_api_exception(
             root, stream=stream, stream_mode=stream_mode
         )
-        if mapped is not None:
-            # Preserve top-level exception for diagnostics even if we classified
-            # using an unwrapped cause.
-            mapped.original_exception = exc
-            return mapped
+        if mapped is None:
+            return ExtendedErrorPolicy.fallback_classifier(exc, stream)
 
-        return ExtendedErrorPolicy.fallback_classifier(exc, stream)
+        # Preserve top-level exception for diagnostics even if we classified
+        # using an unwrapped cause.
+        mapped.original_exception = exc
+        return mapped
 
 
     @staticmethod

@@ -165,9 +165,9 @@ def test_session_swap_between_resolve_and_lock_acquire_triggers_retry(monkeypatc
     # End-to-end write() remains ok.
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 1
-    assert stats.written_rows == 1
-    assert stats.failed_rows == 0
+    assert stats.total_rows == 1
+    assert stats.total_written_rows == 1
+    assert stats.total_failed_rows == 0
     assert stats.skipped_already_exists_rows == 0
 
 
@@ -207,5 +207,5 @@ def test_no_session_swap_appends_exactly_once_without_retry(monkeypatch) -> None
     assert fresh_session.next_offset == 1
 
     assert stats.ok is True
-    assert stats.written_rows == 1
-    assert stats.failed_rows == 0
+    assert stats.total_written_rows == 1
+    assert stats.total_failed_rows == 0

@@ -18,7 +18,7 @@ from google.cloud.bigquery_storage_v1 import types, writer
 # `extended_error_policy`. Keeping the error type as a forward reference here breaks the
 # cycle without affecting dataclass semantics.
 if TYPE_CHECKING:
-    from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+    from adapters.bigquery.storage_write.retry_handler.write_api_error import (
         BigQueryStorageWriteError,
     )
 
@@ -62,7 +62,8 @@ class StorageWriteConfig:
     append_request_overhead_bytes: int = config.DEFAULT_APPEND_REQUEST_OVERHEAD_BYTES
     # Max rows per append request before planner starts a new chunk.
     append_max_rows: int = config.DEFAULT_APPEND_MAX_ROWS
-    # Optional explicit row payload cap in bytes; if None, derived from request budget.
+    # Optional explicit row payload cap in bytes; if None, derived as a
+    # defensive fraction of request budget.
     append_row_max_bytes: int | None = config.DEFAULT_APPEND_ROW_MAX_BYTES
 
 
@@ -85,26 +86,51 @@ class DestinationWriteStats:
     # --- Outcome ---
     ok: bool
 
-    # --- Batch counts ---
-    attempted_rows: int
-    written_rows: int
-    failed_rows: int
+    # --- Batch totals (per write() attempt) ---
+    total_rows: int
+    total_written_rows: int
+    total_failed_rows: int
 
-    # Rows whose chunk was skipped because the server reported ALREADY_EXISTS at their offset window.
+    # --- Limits stage telemetry ---
+    # Row-count totals for resolve_write_limits() stage.
+    # Exactly one of these is non-zero for non-empty input.
+    resolve_write_limit_passed: int = 0
+    resolve_write_limit_failed: int = 0
+
+    # --- Serializer stage telemetry ---
+    # Rows that entered serializer stage (0 when limits stage failed).
+    serializer_attempted_rows: int = 0
+    serializer_rows_passed: int = 0
+    serializer_rows_failed: int = 0
+
+    # Detailed serializer diagnostics (structured row-level reasons).
+    serializer_row_failures: list[RowSerializationError] | None = None
+
+    # --- Chunk planner telemetry ---
+    chunk_planner_attempted: int = 0
+    derived_chunk_count: int = 0
+    # Ordered row-counts per planned chunk, e.g. [200, 200, 100].
+    derived_chunks_len: list[int] | None = None
+
+    # --- AppendRows send telemetry ---
+    append_rows_send_attempted: int = 0
+    append_rows_send_passed: int = 0
+    append_rows_send_failed: int = 0
+
+    # Rows whose chunk was skipped because the server reported ALREADY_EXISTS
+    # at their offset window.
     skipped_already_exists_rows: int = 0
 
-    # --- Error ---
-    error: BigQueryStorageWriteError | None = None
+    # --- Row-errors diagnostics ---
+    row_error_bad_count: int = 0
+    row_error_good_count: int = 0
 
-    # --- Serializer diagnostics ---
-    serializer_row_failures: list[RowSerializationError] | None = None
-    serializer_row_failure_count: int = 0
-
-    # --- Context ---
-    stream_mode: str | None = None
-
-    # When append fails with row_errors, indices refer to serialized chunk rows; these lists map
-    # back to original input dicts (only set when the destination could derive a split).
+    # When append fails with row_errors, indices refer to serialized chunk rows;
+    # these lists map back to original input dicts.
     row_error_bad_rows: list[dict[str, Any]] | None = None
     row_error_good_rows: list[dict[str, Any]] | None = None
+
+    # --- Error / context ---
+    error: BigQueryStorageWriteError | None = None
+    stream_mode: str | None = None
 

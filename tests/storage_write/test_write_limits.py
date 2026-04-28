@@ -52,7 +52,19 @@ def test_resolve_write_limits_happy_path_with_defaults() -> None:
     assert limits.request_overhead_bytes == 256_000
     assert limits.request_payload_budget_bytes == 9_244_000
     assert limits.max_rows == 500
-    assert limits.row_max_bytes == 9_244_000
+    assert limits.row_max_bytes == 2_311_000
+
+
+def test_resolve_write_limits_default_row_max_is_defensive_fraction_of_budget() -> None:
+    limits = resolve_write_limits(
+        _config(
+            append_request_max_bytes=2_000_000,
+            append_request_overhead_bytes=200_000,
+            append_row_max_bytes=None,
+        )
+    )
+    assert limits.request_payload_budget_bytes == 1_800_000
+    assert limits.row_max_bytes == limits.request_payload_budget_bytes // 4
 
 
 def test_resolve_write_limits_happy_path_with_explicit_row_max() -> None:

@@ -190,7 +190,7 @@ adapters/bigquery/storage_write/
 └── retry_handler/
     ├── error_types.py
     ├── error_policy.py
-    ├── writeapierror.py
+    ├── write_api_error.py
     ├── bq_retry_orchestrator.py
     └── bq_retry_orchestrator_models.py
 
@@ -243,7 +243,7 @@ Terminal categories: `INVALID_ARGUMENT`, `PERMISSION`, `AUTH`, `NOT_FOUND`,
 | `append_request_max_bytes` | `9_500_000` | Stays under 10 MB hard cap |
 | `append_request_overhead_bytes` | `256_000` | Reserved budget for framing and schema |
 | `append_max_rows` | `500` | Row cap per append request |
-| `append_row_max_bytes` | derived | Per-row budget derived from request budget when `None` |
+| `append_row_max_bytes` | derived | Per-row budget derived as `(request budget) // 4` when `None` |
 
 `resolve_write_limits(config)` validates limits before planning starts.
 

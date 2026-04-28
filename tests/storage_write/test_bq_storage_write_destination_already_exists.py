@@ -6,9 +6,9 @@ BigQueryStorageWriteDestination.write():
   pending-buffered). The write() loop must NOT break out when it sees one;
   it must advance the offset, log an INFO skip line, bump the
   `skipped_already_exists_rows` counter, and keep attempting remaining chunks.
-- `written_rows` must NOT be incremented for a skipped chunk (this call did
+- `total_written_rows` must NOT be incremented for a skipped chunk (this call did
   not perform that append).
-- `failed_rows` must NOT be incremented either (rows are safe on the server).
+- `total_failed_rows` must NOT be incremented either (rows are safe on the server).
 - The final stats must remain `ok=True` if no other error is terminal.
 
 Three positional scenarios are exercised: first chunk, middle chunk, last chunk.
@@ -29,7 +29,7 @@ from adapters.bigquery.storage_write.bq_storage_write_models import (
     StreamMode,
 )
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
-from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+from adapters.bigquery.storage_write.retry_handler.write_api_error import (
     BigQueryStorageWriteError,
 )
 from adapters.bigquery.storage_write.row_serializer.serializer_models import (
@@ -198,14 +198,14 @@ def test_already_exists_on_first_chunk_skips_and_continues(monkeypatch, caplog) 
 
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 3
-    assert stats.written_rows == 2
+    assert stats.total_rows == 3
+    assert stats.total_written_rows == 2
     assert stats.skipped_already_exists_rows == 1
-    assert stats.failed_rows == 0
+    assert stats.total_failed_rows == 0
     # Accounting invariant.
     assert (
-        stats.attempted_rows
-        == stats.written_rows + stats.failed_rows + stats.skipped_already_exists_rows
+        stats.total_rows
+        == stats.total_written_rows + stats.total_failed_rows + stats.skipped_already_exists_rows
     )
 
     _assert_skip_log_for_chunk(caplog, chunk_index=0)
@@ -225,13 +225,13 @@ def test_already_exists_on_middle_chunk_skips_and_continues(monkeypatch, caplog)
 
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 3
-    assert stats.written_rows == 2
+    assert stats.total_rows == 3
+    assert stats.total_written_rows == 2
     assert stats.skipped_already_exists_rows == 1
-    assert stats.failed_rows == 0
+    assert stats.total_failed_rows == 0
     assert (
-        stats.attempted_rows
-        == stats.written_rows + stats.failed_rows + stats.skipped_already_exists_rows
+        stats.total_rows
+        == stats.total_written_rows + stats.total_failed_rows + stats.skipped_already_exists_rows
     )
 
     _assert_skip_log_for_chunk(caplog, chunk_index=1)
@@ -251,13 +251,13 @@ def test_already_exists_on_last_chunk_still_returns_ok(monkeypatch, caplog) -> N
 
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 3
-    assert stats.written_rows == 2
+    assert stats.total_rows == 3
+    assert stats.total_written_rows == 2
     assert stats.skipped_already_exists_rows == 1
-    assert stats.failed_rows == 0
+    assert stats.total_failed_rows == 0
     assert (
-        stats.attempted_rows
-        == stats.written_rows + stats.failed_rows + stats.skipped_already_exists_rows
+        stats.total_rows
+        == stats.total_written_rows + stats.total_failed_rows + stats.skipped_already_exists_rows
     )
 
     _assert_skip_log_for_chunk(caplog, chunk_index=2)
@@ -281,13 +281,13 @@ def test_already_exists_on_every_chunk_is_still_ok_with_zero_writes(monkeypatch,
     # three skipped rows for reconciliation.
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 3
-    assert stats.written_rows == 0
+    assert stats.total_rows == 3
+    assert stats.total_written_rows == 0
     assert stats.skipped_already_exists_rows == 3
-    assert stats.failed_rows == 0
+    assert stats.total_failed_rows == 0
     assert (
-        stats.attempted_rows
-        == stats.written_rows + stats.failed_rows + stats.skipped_already_exists_rows
+        stats.total_rows
+        == stats.total_written_rows + stats.total_failed_rows + stats.skipped_already_exists_rows
     )
 
     # One skip log per chunk, all at INFO.
