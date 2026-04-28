@@ -6,7 +6,7 @@ from adapters.bigquery.storage_write.retry_handler.bq_retry_orchestrator_models 
     FlattenedRetryOrchestratorStats,
     RetryOrchestratorStats,
 )
-from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+from adapters.bigquery.storage_write.retry_handler.write_api_error import (
     BigQueryStorageWriteError,
 )
 

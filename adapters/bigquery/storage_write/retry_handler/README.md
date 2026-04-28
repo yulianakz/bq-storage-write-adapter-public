@@ -1,6 +1,6 @@
-# Retry Handler (Draft)
+# Retry Handler 
 
-## Small Intro
+## Introduction
 
 `retry_handler` contains the policy layer for classifying Storage Write failures into actionable outcomes (retry, reset stream, DLQ, advance offset, or fail fast).
 
@@ -133,3 +133,158 @@ Known uncommon forms not parsed yet:
 ## Notes for Next Revision
 
 - Decide and implement explicit precedence rule if backend ever returns both `response.error` and `row_errors` together.
+
+---
+
+## Retry Orchestrator
+
+### Small Intro
+
+`BigQueryWriteRetryOrchestrator` currently acts as a proxy wrapper around destination I/O:
+
+- it wraps destination `write(rows)` and `close()`
+- it directly calls destination methods from inside its own `write()` / `close()`
+- it reads `DestinationWriteStats.error` (`BigQueryStorageWriteError`) and decides whether to:
+  - return immediately (success or terminal failure), or
+  - sleep with backoff and retry the same batch
+
+The orchestrator owns retry budget, retry counters, and final retry telemetry.
+It does not perform chunk-level appends itself; chunking stays inside destination.
+
+---
+
+### Retry Orchestrator Flow
+
+```text
+                     BigQueryWriteRetryOrchestrator
+                                  │
+                                  ▼
+                          write(input_rows)
+                                  │
+                                  ▼
+                    destination.write(input_rows)
+                                  │
+                                  ▼
+                     DestinationWriteStats + error?
+                                  │
+                  ┌───────────────┴────────────────┐
+                  │                                │
+                  ▼                                ▼
+              error is None                    error exists
+                  │                                │
+                  ▼                                ▼
+      return success RetryOrchestratorStats   classify by category
+                                                   │
+                                                   ▼
+                                    retryable and retry budget left?
+                                                   │
+                           ┌───────────────────────┴───────────────────────┐
+                           │                                               │
+                           ▼                                               ▼
+                    no (terminal path)                             yes (retry path)
+                           │                                               │
+                           ▼                                               ▼
+        return failed RetryOrchestratorStats                 backoff sleep + retry
+                                                              (same input_rows again)
+```
+
+---
+
+### How it works
+
+1. Orchestrator receives a full `rows` batch from the caller.
+2. It calls `destination.write(rows)` and gets `DestinationWriteStats`.
+3. If `destination_stats.error` is `None`, it returns success immediately.
+4. If error exists:
+   - compute `max_retries` from category policy (`RETRY_ATTEMPTS_BY_CATEGORY`)
+   - if non-retryable: return terminal failed stats immediately
+   - if retryable but budget exhausted: return terminal failed stats
+   - if retryable and budget available: increment retry counters, compute backoff, sleep, and call destination again with the same `rows`
+5. On close, orchestrator delegates `close()` to destination; it does not manage stream lifecycle itself.
+
+---
+
+### Retryable Errors (Current Policy)
+
+| ErrorCategory | Retry attempts |
+| --- | --- |
+| `THROTTLE` | `3` |
+| `TRANSPORT` | `2` |
+| `DEADLINE` | `2` |
+| `INTERNAL` | `1` |
+| `STREAM_INVALIDATED` | `1` |
+| `OFFSET_OUT_OF_RANGE` | `1` |
+| `ROW_ERRORS` | `0` |
+| `ALREADY_EXISTS` | `0` |
+| `INVALID_ARGUMENT` | `0` |
+| `PERMISSION` | `0` |
+| `AUTH` | `0` |
+| `NOT_FOUND` | `0` |
+| `UNKNOWN` | `0` |
+| `SUCCESS` | `0` |
+
+---
+
+### Current edge cases and limitations
+
+- **Batch-level retry contract.**
+  Orchestrator retries by replaying the same original `rows` batch, not a computed suffix.
+- **Chunking happens only in destination.**
+  For large payloads, destination may split one input batch into multiple append chunks.
+- **Partial progress in chunked writes is possible.**
+  If chunk N succeeds and chunk N+1 fails, retry replays original batch; already-accepted chunks may return `ALREADY_EXISTS`.
+- **Correctness currently relies on idempotent offset behavior.**
+  Replay safety depends on server-side offset semantics (`ALREADY_EXISTS` as benign no-op for already-accepted offsets).
+- **Cost/perf trade-off on large chunked batches.**
+  Replay of full input can add extra round-trips when many earlier chunks already succeeded.
+- **No row-level retry path by design.**
+  This module intentionally preserves batch semantics and avoids per-row transport retry behavior.
+
+- **Retry backoff is blocking per worker (`time.sleep`).**
+  Retry waits are synchronous in the orchestrator loop. This is simple and deterministic,
+  but in high-parallel worker setups it can reduce effective throughput while workers sleep.
+  Future hardening: optional non-blocking/asynchronous retry scheduling at pipeline level.
+
+---
+
+## Retry Orchestrator Stats
+
+`RetryOrchestratorStats` is the orchestrator-owned telemetry envelope around one
+logical write operation. It includes:
+
+- destination snapshot from the last destination attempt (`destination_stats`)
+- retry loop counters accumulated across attempts
+- last error metadata used by logs/alerts
+
+### Fields and ownership
+
+| Field | Owned by | Meaning |
+| --- | --- | --- |
+| `destination_stats` | Destination | Last per-attempt `DestinationWriteStats` snapshot returned by destination. |
+| `retry_attempts_total` | Orchestrator | Number of retries performed after the initial attempt. |
+| `total_rows_passed_to_retry` | Orchestrator | Sum of `len(rows)` for each scheduled retry. |
+| `retries_by_category` | Orchestrator | Retry count grouped by error category label. |
+| `max_retries_for_last_error` | Orchestrator | Retry budget configured for the last observed error category. |
+| `last_error` | Orchestrator | Last classified error object seen in retry loop. |
+| `last_error_category` | Orchestrator | Category label for `last_error`. |
+| `last_status_code` | Orchestrator | gRPC/status code for `last_error` when present. |
+
+### Flattened stats purpose
+
+`RetryOrchestratorStats.flatten()` returns `FlattenedRetryOrchestratorStats` for:
+
+- logging and metrics payloads that should avoid nested dataclass traversal
+- stable, typed fields for dashboards/alerts
+- preserving destination stage counters and orchestrator retry counters in one flat object
+
+Flattened output includes:
+
+- orchestrator counters (`retry_attempts_total`, `total_rows_passed_to_retry`, `retries_by_category`, last error metadata)
+- destination counters (`dest_total_rows`, serializer/chunk/send counters, row-error counts, skip counts, stream mode)
+- destination error summary (`dest_error_category`, `dest_error_status_code`)
+
+### Contract notes
+
+- Destination stats remain **per-attempt** and are not accumulated across retries.
+- Orchestrator stats remain **cross-attempt** for retry behavior only.
+- Loop-guard fallback path returns a synthetic destination stats object with safe defaults so flatten stays schema-consistent.

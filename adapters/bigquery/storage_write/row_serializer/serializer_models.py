@@ -7,6 +7,7 @@ class RowSerializationError:
     row_index: int
     reason_enum: str
     error_message: str
+    field_path: str | None = None
     raw_row: Mapping[str, Any] | None = None
 
 

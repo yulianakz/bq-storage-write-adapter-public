@@ -10,7 +10,7 @@ from adapters.bigquery.storage_write.retry_handler.bq_retry_orchestrator_models 
     RetryOrchestratorStats,
 )
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
-from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+from adapters.bigquery.storage_write.retry_handler.write_api_error import (
     BigQueryStorageWriteError,
 )
 from ports import Destination
@@ -22,7 +22,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
 
     _DEFAULT_ROWS_PREVIEW_LIMIT = 3
     _MIN_BACKOFF_SECONDS = 0.1
-    _MAX_LOOP_ITERATIONS = 10
+    _LOOP_ITERATION_MARGIN = 2
 
     RETRY_ATTEMPTS_BY_CATEGORY: dict[ErrorCategory, int] = {
         ErrorCategory.THROTTLE: 3,
@@ -62,6 +62,12 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
         if error.category is None:
             return 0
         return cls.RETRY_ATTEMPTS_BY_CATEGORY.get(error.category, 0)
+
+    @classmethod
+    def max_loop_iterations(cls) -> int:
+        """Guard loop count from retry policy (+ initial attempt + safety margin)."""
+        max_retries = max(cls.RETRY_ATTEMPTS_BY_CATEGORY.values(), default=0)
+        return max_retries + cls._LOOP_ITERATION_MARGIN
 
     @staticmethod
     def _compute_backoff_seconds(
@@ -113,6 +119,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
         rows_preview: list[dict[str, Any]],
         loop_iterations: int,
         retry_attempt: int,
+        total_rows_passed_to_retry: int,
         retries_by_category: dict[str, int],
         max_retries_for_last_error: int | None,
         last_error: BigQueryStorageWriteError | None,
@@ -137,9 +144,9 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
             )
             last_destination_stats = DestinationWriteStats(
                 ok=False,
-                attempted_rows=len(rows),
-                written_rows=0,
-                failed_rows=len(rows),
+                total_rows=len(rows),
+                total_written_rows=0,
+                total_failed_rows=len(rows),
                 stream_mode=self._stream_mode_label(),
             )
 
@@ -168,9 +175,9 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
                     last_error.category.value if last_error and last_error.category else None
                 ),
                 "last_status_code": last_error.status_code if last_error else None,
-                "last_dest_written_rows": last_destination_stats.written_rows,
-                "last_dest_failed_rows": last_destination_stats.failed_rows,
-                "last_dest_serializer_failure_count": last_destination_stats.serializer_row_failure_count,
+                "last_dest_total_written_rows": last_destination_stats.total_written_rows,
+                "last_dest_total_failed_rows": last_destination_stats.total_failed_rows,
+                "last_dest_serializer_failure_count": last_destination_stats.serializer_rows_failed,
                 "last_dest_stream_mode": last_destination_stats.stream_mode,
             },
         )
@@ -183,6 +190,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
         return RetryOrchestratorStats(
             destination_stats=dest_stats_with_loop_guard_error,
             retry_attempts_total=retry_attempt,
+            total_rows_passed_to_retry=total_rows_passed_to_retry,
             retries_by_category=retries_by_category or None,
             max_retries_for_last_error=max_retries_for_last_error,
             last_error=loop_guard_error,
@@ -199,6 +207,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
 
         # Retry-attempt counter is retries after first failed write.
         retry_attempt = 0
+        total_rows_passed_to_retry = 0
         loop_iterations = 0
         rows_preview = list(rows[: self._DEFAULT_ROWS_PREVIEW_LIMIT])
         retries_by_category: dict[str, int] = {}
@@ -208,12 +217,13 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
 
         while True:
             loop_iterations += 1
-            if loop_iterations > self._MAX_LOOP_ITERATIONS:
+            if loop_iterations > self.max_loop_iterations():
                 return self._finalize_loop_guard_exit(
                     rows=rows,
                     rows_preview=rows_preview,
                     loop_iterations=loop_iterations,
                     retry_attempt=retry_attempt,
+                    total_rows_passed_to_retry=total_rows_passed_to_retry,
                     retries_by_category=retries_by_category,
                     max_retries_for_last_error=max_retries_for_last_error,
                     last_error=last_error,
@@ -240,6 +250,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
                 return RetryOrchestratorStats(
                     destination_stats=destination_stats,
                     retry_attempts_total=retry_attempt,
+                    total_rows_passed_to_retry=total_rows_passed_to_retry,
                     retries_by_category=retries_by_category or None,
                     max_retries_for_last_error=max_retries_for_last_error,
                     last_error=last_error,
@@ -284,6 +295,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
                 return RetryOrchestratorStats(
                     destination_stats=destination_stats,
                     retry_attempts_total=retry_attempt,
+                    total_rows_passed_to_retry=total_rows_passed_to_retry,
                     retries_by_category=retries_by_category or None,
                     max_retries_for_last_error=max_retries_for_last_error,
                     last_error=err,
@@ -317,6 +329,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
                 return RetryOrchestratorStats(
                     destination_stats=destination_stats,
                     retry_attempts_total=retry_attempt,
+                    total_rows_passed_to_retry=total_rows_passed_to_retry,
                     retries_by_category=retries_by_category or None,
                     max_retries_for_last_error=max_retries_for_last_error,
                     last_error=err,
@@ -326,6 +339,7 @@ class BigQueryWriteRetryOrchestrator(Destination[dict[str, Any], RetryOrchestrat
 
             # Retry branch.
             retry_attempt += 1
+            total_rows_passed_to_retry += len(rows)
             retries_by_category[category_label] = retries_by_category.get(category_label, 0) + 1
             sleep_seconds = self._compute_backoff_seconds(
                 category=err.category,

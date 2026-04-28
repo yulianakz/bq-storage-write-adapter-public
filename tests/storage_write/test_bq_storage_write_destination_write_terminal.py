@@ -6,7 +6,7 @@ session-swap-race suites:
 - Empty-rows short-circuit: write([]) must return ok=True with zero counts
   and must NOT lazily create a session or touch the serializer.
 - Non-row-errors terminal policy error: the destination must stop issuing
-  further AppendRowsRequests, preserve written_rows from earlier chunks (here
+  further AppendRowsRequests, preserve total_written_rows from earlier chunks (here
   zero, since the very first chunk fails), and surface the policy error on
   DestinationWriteStats.error with ok=False.
 """
@@ -22,7 +22,7 @@ from adapters.bigquery.storage_write.bq_storage_write_models import (
     StreamMode,
 )
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
-from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+from adapters.bigquery.storage_write.retry_handler.write_api_error import (
     BigQueryStorageWriteError,
 )
 from adapters.bigquery.storage_write.row_serializer.serializer_models import (
@@ -83,6 +83,71 @@ def _config(**overrides) -> StorageWriteConfig:
     )
 
 
+def test_write_translates_invalid_limit_config_into_stats(monkeypatch) -> None:
+    # If limit config is invalid, write() must not raise; it should return
+    # structured stats with a non-retryable error.
+    destination = BigQueryStorageWriteDestination(
+        config=_config(append_request_max_bytes=0)
+    )
+
+    stats = destination.write([{"id": "a"}])
+
+    assert stats.ok is False
+    assert stats.total_rows == 1
+    assert stats.total_written_rows == 0
+    assert stats.total_failed_rows == 1
+    assert stats.error is not None
+    assert stats.error.retryable is False
+    assert stats.error.category == ErrorCategory.INVALID_ARGUMENT
+    assert "append_request_max_bytes must be > 0" in str(stats.error)
+
+
+def test_write_caches_resolved_limits(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def fake_resolve_write_limits(config):
+        calls["n"] += 1
+        # Only the fields used by write() matter here.
+        return type(
+            "_Limits",
+            (object,),
+            {
+                "row_max_bytes": 256_000,
+                "max_rows": 10,
+                "request_payload_budget_bytes": 1_000_000,
+            },
+        )()
+
+    monkeypatch.setattr(
+        "adapters.bigquery.storage_write.bq_storage_write_destination.resolve_write_limits",
+        fake_resolve_write_limits,
+    )
+
+    # Avoid needing a real session; both writes can short-circuit on serializer returning nothing.
+    class _FakeSerializer:
+        def serialize_rows(self, rows, *, row_max_bytes):
+            return SerializationBatchResult(good_serialized_rows=[], bad_rows=[], good_row_indices=[])
+
+    fake_session = StorageWriteSession(
+        write_client=_FakeWriteClient(),
+        stream_name="projects/p/datasets/d/tables/t/streams/s",
+        proto_schema=SimpleNamespace(),
+        row_serializer=_FakeSerializer(),
+        append_rows_stream=_FakeAppendRowsStream(),
+    )
+    monkeypatch.setattr(
+        "adapters.bigquery.storage_write.bq_storage_write_destination.create_storage_write_session",
+        lambda config: fake_session,
+    )
+
+    destination = BigQueryStorageWriteDestination(config=_config())
+
+    destination.write([{"id": "a"}])
+    destination.write([{"id": "b"}])
+
+    assert calls["n"] == 1
+
+
 def test_write_empty_rows_returns_ok_without_creating_session(monkeypatch) -> None:
     session_factory_calls = {"n": 0}
 
@@ -102,11 +167,11 @@ def test_write_empty_rows_returns_ok_without_creating_session(monkeypatch) -> No
     assert session_factory_calls["n"] == 0
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 0
-    assert stats.written_rows == 0
-    assert stats.failed_rows == 0
+    assert stats.total_rows == 0
+    assert stats.total_written_rows == 0
+    assert stats.total_failed_rows == 0
     assert stats.skipped_already_exists_rows == 0
-    assert stats.serializer_row_failure_count == 0
+    assert stats.serializer_rows_failed == 0
     assert stats.serializer_row_failures is None
     assert stats.stream_mode == StreamMode.COMMITTED.value
 
@@ -158,9 +223,9 @@ def test_write_surfaces_non_retryable_terminal_policy_error_in_stats(monkeypatch
 
     assert stats.ok is False
     assert stats.error is terminal_error
-    assert stats.attempted_rows == 2
-    assert stats.written_rows == 0
-    assert stats.failed_rows == 2
+    assert stats.total_rows == 2
+    assert stats.total_written_rows == 0
+    assert stats.total_failed_rows == 2
     assert stats.skipped_already_exists_rows == 0
     # No row_errors were attached to this terminal, so the mapping stays empty.
     assert stats.row_error_bad_rows is None

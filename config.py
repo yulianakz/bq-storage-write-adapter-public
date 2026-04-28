@@ -22,6 +22,6 @@ DEFAULT_APPEND_REQUEST_OVERHEAD_BYTES: int = 256_000
 DEFAULT_APPEND_MAX_ROWS: int = 500
 
 # Optional explicit per-row payload cap in bytes.
-# When None, the per-row cap is derived from
-# `append_request_max_bytes - append_request_overhead_bytes`.
+# When None, the per-row cap is derived defensively as
+# `(append_request_max_bytes - append_request_overhead_bytes) // 4`.
 DEFAULT_APPEND_ROW_MAX_BYTES: int | None = None

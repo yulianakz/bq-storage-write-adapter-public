@@ -4,7 +4,13 @@ from typing import Any, Sequence
 from google.cloud.bigquery_storage_v1 import types
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
-from .proto_schema_utilities import ProtoBuildResult, _add_fields_rec, _schema_signature, _to_field_specs
+from .proto_schema_utilities import (
+    ProtoBuildResult,
+    _add_fields_rec,
+    _schema_signature,
+    _to_field_specs,
+    _validate_schema_fields,
+)
 
 
 class BQProtoSchemaBuilder:
@@ -30,6 +36,7 @@ class BQProtoSchemaBuilder:
         message_name: str,
         package: str = "dynamic_bq",
     ) -> ProtoBuildResult:
+        _validate_schema_fields(schema_fields, context="root")
         specs = _to_field_specs(schema_fields)
         signature = _schema_signature(schema_fields)
         cache_key = (message_name, signature)

@@ -7,7 +7,7 @@ check, since both are consumed by the destination/orchestrator control flow.
 from types import SimpleNamespace
 
 from adapters.bigquery.storage_write.retry_handler.error_types import ErrorCategory
-from adapters.bigquery.storage_write.retry_handler.writeapierror import (
+from adapters.bigquery.storage_write.retry_handler.write_api_error import (
     BigQueryStorageWriteError,
 )
 

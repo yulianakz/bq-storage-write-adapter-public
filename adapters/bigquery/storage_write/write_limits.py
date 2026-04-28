@@ -53,7 +53,9 @@ def resolve_write_limits(config: SupportsWriteLimits) -> ResolvedWriteLimits:
     request_payload_budget_bytes = request_max_bytes - request_overhead_bytes
 
     if explicit_row_max_bytes is None:
-        row_max_bytes = request_payload_budget_bytes
+        # Defensive default: keep room for multiple rows per request and
+        # surface likely upstream payload-quality bugs earlier.
+        row_max_bytes = request_payload_budget_bytes // 4
     else:
         if explicit_row_max_bytes <= 0:
             raise ValueError(

@@ -179,12 +179,12 @@ def test_committed_stream_full_flow_write_then_close(monkeypatch) -> None:
     session = container["session"]
     assert destination._session is session
 
-    # Serializer saw the full input batch with the derived row_max_bytes (the
-    # resolved payload budget == request_max - overhead == 16 - 8 == 8).
+    # Serializer saw the full input batch with the derived strict row_max_bytes
+    # (row_max == (request_max - overhead) // 4 == (16 - 8) // 4 == 2).
     assert len(fake_serializer.calls) == 1
     serialize_call_rows, serialize_call_row_max = fake_serializer.calls[0]
     assert serialize_call_rows == tuple(rows)
-    assert serialize_call_row_max == 8
+    assert serialize_call_row_max == 2
 
     # Planner split 3 x 4-byte rows into 2 AppendRowsRequests at payload bytes
     # 8 and 4 respectively. Offsets are consecutive across chunks.
@@ -202,11 +202,11 @@ def test_committed_stream_full_flow_write_then_close(monkeypatch) -> None:
     # DestinationWriteStats is clean on a full success.
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 3
-    assert stats.written_rows == 3
-    assert stats.failed_rows == 0
+    assert stats.total_rows == 3
+    assert stats.total_written_rows == 3
+    assert stats.total_failed_rows == 0
     assert stats.skipped_already_exists_rows == 0
-    assert stats.serializer_row_failure_count == 0
+    assert stats.serializer_rows_failed == 0
     assert stats.serializer_row_failures is None
     assert stats.row_error_bad_rows is None
     assert stats.row_error_good_rows is None
@@ -254,9 +254,9 @@ def test_pending_stream_full_flow_write_mark_succeeded_then_close(monkeypatch) -
     session = container["session"]
     assert stats.ok is True
     assert stats.error is None
-    assert stats.attempted_rows == 2
-    assert stats.written_rows == 2
-    assert stats.failed_rows == 0
+    assert stats.total_rows == 2
+    assert stats.total_written_rows == 2
+    assert stats.total_failed_rows == 0
     assert stats.stream_mode == StreamMode.PENDING.value
     assert session.next_offset == 2
     assert session.state == StreamLifecycleState.OPEN

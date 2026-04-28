@@ -110,10 +110,10 @@ def test_write_skips_append_when_all_rows_fail_serializer(monkeypatch) -> None:
     # error (ok=False) alongside the per-row serializer diagnostics that the
     # pipeline routes to DLQ.
     assert stats.ok is False
-    assert stats.attempted_rows == 2
-    assert stats.written_rows == 0
-    assert stats.failed_rows == 2
-    assert stats.serializer_row_failure_count == 2
+    assert stats.total_rows == 2
+    assert stats.total_written_rows == 0
+    assert stats.total_failed_rows == 2
+    assert stats.serializer_rows_failed == 2
     assert stats.serializer_row_failures is not None
     assert len(stats.serializer_row_failures) == 2
     assert stats.error is not None
@@ -160,10 +160,10 @@ def test_write_appends_only_good_serialized_rows(monkeypatch) -> None:
     stats = destination.write(rows)
 
     assert stats.ok is True
-    assert stats.attempted_rows == 3
-    assert stats.written_rows == 2
-    assert stats.failed_rows == 1
-    assert stats.serializer_row_failure_count == 1
+    assert stats.total_rows == 3
+    assert stats.total_written_rows == 2
+    assert stats.total_failed_rows == 1
+    assert stats.serializer_rows_failed == 1
     assert stats.serializer_row_failures is not None
     assert len(stats.serializer_row_failures) == 1
     assert len(fake_stream.requests) == 1
@@ -208,8 +208,8 @@ def test_write_splits_large_batch_into_multiple_appends(monkeypatch) -> None:
     stats = destination.write([{"id": "a"}, {"id": "b"}, {"id": "c"}])
 
     assert stats.ok is True
-    assert stats.written_rows == 3
-    assert stats.failed_rows == 0
+    assert stats.total_written_rows == 3
+    assert stats.total_failed_rows == 0
     assert len(fake_stream.requests) == 2
     assert list(fake_stream.requests[0].proto_rows.rows.serialized_rows) == [b"aaaa", b"bbbb"]
     assert list(fake_stream.requests[1].proto_rows.rows.serialized_rows) == [b"cccc"]
@@ -252,8 +252,8 @@ def test_write_tiny_budget_splits_on_exact_payload_boundary(monkeypatch) -> None
     stats = destination.write([{"id": "a"}, {"id": "b"}, {"id": "c"}])
 
     assert stats.ok is True
-    assert stats.written_rows == 3
-    assert stats.failed_rows == 0
+    assert stats.total_written_rows == 3
+    assert stats.total_failed_rows == 0
     assert len(fake_stream.requests) == 2
     # First request fills payload budget exactly: 4 + 4 == 8 bytes.
     assert list(fake_stream.requests[0].proto_rows.rows.serialized_rows) == [b"aaaa", b"bbbb"]
